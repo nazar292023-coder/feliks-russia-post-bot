@@ -2,11 +2,10 @@
 import os
 import html
 import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+import threading
+
+from flask import Flask
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,29 +18,34 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_IDS = {
     int(os.getenv("ADMIN_ID", "0")),
     int(os.getenv("ADMIN_ID_2", "0")),
 }
-CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# Данные ожидающей публикации
+web = Flask(__name__)
+
+
+@web.get("/")
+def home():
+    return "FELIKS RUSSIA POST BOT is running", 200
+
+
 drafts = {}
 
 
 def is_admin(user_id):
-    return user_id == ADMIN_ID and ADMIN_ID != 0
+    return user_id in ADMIN_IDS and user_id != 0
 
 
 def post_text(topic):
-    safe_topic = html.escape(topic.strip())
-
     return (
-        f"🎮 <b>FELIKS RUSSIA | НОВОСТИ</b>\n\n"
-        f"📢 <b>{safe_topic}</b>\n\n"
-        f"Следите за новостями проекта и не пропускайте "
-        f"важные обновления!\n\n"
-        f"❤️ <b>FELIKS RUSSIA — играй вместе с нами!</b>"
+        "🎮 <b>FELIKS RUSSIA | НОВОСТИ</b>\n\n"
+        f"📢 <b>{html.escape(topic.strip())}</b>\n\n"
+        "Следите за новостями проекта и не пропускайте "
+        "важные обновления!\n\n"
+        "❤️ <b>FELIKS RUSSIA — играй вместе с нами!</b>"
     )
 
 
@@ -68,25 +72,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "👑 <b>FELIKS RUSSIA | POST BOT</b>\n\n"
+        "👑 FELIKS RUSSIA | POST BOT\n\n"
         "1. Отправь фотографию.\n"
-        "2. Следующим сообщением напиши тему новости.\n"
-        "3. Проверь готовый пост и нажми «Опубликовать».\n\n"
-        "Публикация появится в канале после подтверждения.",
-        parse_mode="HTML"
+        "2. Следующим сообщением отправь тему.\n"
+        "3. Проверь пост и нажми «Опубликовать»."
     )
 
 
 async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
-    drafts[update.effective_user.id] = {
-        "photo": update.message.photo[-1].file_id
-    }
+    drafts[user_id] = {"photo": update.message.photo[-1].file_id}
     await update.message.reply_text(
-        "✅ Фото получено!\nТеперь отправь тему новости одним сообщением."
+        "✅ Фото получено! Теперь отправь тему новости."
     )
 
 
@@ -97,18 +99,17 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
-    if user_id not in drafts or "photo" not in drafts[user_id]:
-        await update.message.reply_text(
-            "Сначала отправь фотографию новости."
-        )
+    draft = drafts.get(user_id)
+    if not draft or "photo" not in draft:
+        await update.message.reply_text("Сначала отправь фотографию.")
         return
 
     topic = update.message.text.strip()
     if not topic:
-        await update.message.reply_text("Напиши тему новости текстом.")
+        await update.message.reply_text("Напиши тему новости.")
         return
 
-    drafts[user_id]["caption"] = post_text(topic)
+    draft["caption"] = post_text(topic)
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Опубликовать", callback_data="publish")],
@@ -117,14 +118,16 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_photo(
         chat_id=user_id,
-        photo=drafts[user_id]["photo"],
-        caption=drafts[user_id]["caption"],
+        photo=draft["photo"],
+        caption=draft["caption"],
         parse_mode="HTML",
         reply_markup=keyboard,
     )
 
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_buttons(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -139,39 +142,40 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(caption="❌ Публикация отменена.")
         return
 
-    if query.data == "publish":
-        draft = drafts.get(user_id)
+    if query.data != "publish":
+        return
 
-        if not draft or "caption" not in draft:
-            await query.edit_message_caption(
-                caption="⚠️ Черновик не найден. Создай пост заново."
-            )
-            return
+    draft = drafts.get(user_id)
+    if not draft or "caption" not in draft:
+        await query.edit_message_caption(
+            caption="⚠️ Черновик не найден. Создай пост заново."
+        )
+        return
 
-        if not CHANNEL_ID:
-            await query.edit_message_caption(
-                caption="⚠️ Не настроен CHANNEL_ID в переменных окружения."
-            )
-            return
+    if not CHANNEL_ID:
+        await query.edit_message_caption(
+            caption="⚠️ Не задан CHANNEL_ID."
+        )
+        return
 
-        try:
-            await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=draft["photo"],
-                caption=draft["caption"],
-                parse_mode="HTML",
-                reply_markup=post_buttons(),
-            )
-            drafts.pop(user_id, None)
-            await query.edit_message_caption(
-                caption="✅ Пост успешно опубликован в канале!"
-            )
-        except Exception:
-            logging.exception("Ошибка публикации")
-            await query.edit_message_caption(
-                caption="❌ Не удалось опубликовать пост. "
-                        "Проверь CHANNEL_ID и права бота в канале."
-            )
+    try:
+        await context.bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=draft["photo"],
+            caption=draft["caption"],
+            parse_mode="HTML",
+            reply_markup=post_buttons(),
+        )
+        drafts.pop(user_id, None)
+        await query.edit_message_caption(
+            caption="✅ Пост опубликован в канале!"
+        )
+    except Exception:
+        logging.exception("Ошибка публикации")
+        await query.edit_message_caption(
+            caption="❌ Ошибка публикации. Проверь CHANNEL_ID "
+                    "и права бота в канале."
+        )
 
 
 def main():
@@ -185,9 +189,19 @@ def main():
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic)
     )
+
+    port = int(os.environ.get("PORT", "10000"))
+    threading.Thread(
+        target=lambda: web.run(
+            host="0.0.0.0", port=port, use_reloader=False
+        ),
+        daemon=True,
+    ).start()
+
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
-                        
+    
+        
