@@ -19,7 +19,10 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_IDS = {
+    int(os.getenv("ADMIN_ID", "0")),
+    int(os.getenv("ADMIN_ID_2", "0")),
+}
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 # Данные ожидающей публикации
